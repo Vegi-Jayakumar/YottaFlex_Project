@@ -1,4 +1,5 @@
 import json
+import numpy as np
 import pandas as pd
 from .config import REQUIRED_COLUMNS
 
@@ -36,8 +37,7 @@ def validate_entity(df, entity, source_file):
             "source_record_id": row["_source_record_id"],
             "issue_type": issue_type,
             "issue_description": description,
-            "raw_record": json.dumps(row.drop(labels=["_source_record_id"]).to_dict(),
-                                     default=str),
+            "raw_record": json.dumps(row.drop(labels=["_source_record_id"]).to_dict(), default=str),
         })
 
     for idx, row in data.iterrows():
@@ -59,9 +59,9 @@ def validate_entity(df, entity, source_file):
 
     elif entity == "products":
         data["unit_price"] = pd.to_numeric(data["unit_price"], errors="coerce")
-        bad = data["unit_price"].isna() | (data["unit_price"] < 0)
+        bad = data["unit_price"].isna() | (data["unit_price"] < 0) | (~np.isfinite(data["unit_price"]))
         for idx in data.index[bad]:
-            reject(idx, "INVALID_PRICE", "unit_price must be a non-negative number")
+            reject(idx, "INVALID_PRICE", "unit_price must be a finite non-negative number")
         data = data.loc[~bad].copy()
         data["product_name"] = data["product_name"].astype("string").str.strip()
         bad_name = data["product_name"].isna() | (data["product_name"] == "")
@@ -72,7 +72,7 @@ def validate_entity(df, entity, source_file):
     elif entity == "orders":
         data["quantity"] = pd.to_numeric(data["quantity"], errors="coerce")
         data["order_date"] = pd.to_datetime(data["order_date"], errors="coerce")
-        bad_qty = data["quantity"].isna() | (data["quantity"] <= 0) | (data["quantity"] % 1 != 0)
+        bad_qty = data["quantity"].isna() | (data["quantity"] <= 0) | (data["quantity"] % 1 != 0) | (~np.isfinite(data["quantity"]))
         bad_date = data["order_date"].isna()
         for idx in data.index[bad_qty]:
             reject(idx, "INVALID_QUANTITY", "quantity must be a positive integer")
