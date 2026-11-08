@@ -15,7 +15,7 @@ python -m pip install -r requirements.txt
 Generate deterministic sample inputs and run the pipeline:
 
 ```powershell
-python -m scripts.generate_data --rows 1000 --seed 42
+python -m scripts.generate_data --rows 100000 --seed 42
 python -m src.main
 ```
 
