@@ -24,8 +24,9 @@ CREATE TABLE IF NOT EXISTS source_files (
     file_name TEXT NOT NULL,
     file_path TEXT NOT NULL,
     file_hash TEXT NOT NULL,
-    input_row_count INTEGER DEFAULT 0,
+    input_row_count INTEGER,
     file_status TEXT,
+    error_message TEXT,
     FOREIGN KEY(run_id) REFERENCES pipeline_runs(run_id)
 );
 
@@ -36,6 +37,9 @@ CREATE TABLE IF NOT EXISTS transformation_logs (
     description TEXT,
     rows_affected INTEGER DEFAULT 0,
     execution_time_seconds REAL,
+    input_source_file_ids TEXT,
+    output_artifact_id TEXT,
+    transformation_version TEXT NOT NULL DEFAULT '1',
     FOREIGN KEY(run_id) REFERENCES pipeline_runs(run_id)
 );
 
@@ -44,10 +48,13 @@ CREATE TABLE IF NOT EXISTS data_quality_issues (
     run_id TEXT NOT NULL,
     source_file TEXT NOT NULL,
     source_record_id TEXT,
+    source_record_number INTEGER,
+    source_file_id INTEGER,
     issue_type TEXT NOT NULL,
     issue_description TEXT NOT NULL,
     raw_record TEXT,
-    FOREIGN KEY(run_id) REFERENCES pipeline_runs(run_id)
+    FOREIGN KEY(run_id) REFERENCES pipeline_runs(run_id),
+    FOREIGN KEY(source_file_id) REFERENCES source_files(source_file_id)
 );
 
 CREATE TABLE IF NOT EXISTS data_lineage (
@@ -58,8 +65,31 @@ CREATE TABLE IF NOT EXISTS data_lineage (
     output_table TEXT NOT NULL,
     output_row_count INTEGER NOT NULL,
     output_hash TEXT,
+    output_artifact_id TEXT,
+    dependency_role TEXT NOT NULL DEFAULT 'PRIMARY_SOURCE',
     FOREIGN KEY(run_id) REFERENCES pipeline_runs(run_id),
     FOREIGN KEY(source_file_id) REFERENCES source_files(source_file_id)
+);
+
+CREATE TABLE IF NOT EXISTS output_artifacts (
+    output_artifact_id TEXT PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    output_location TEXT NOT NULL,
+    output_table TEXT NOT NULL,
+    output_row_count INTEGER NOT NULL,
+    output_hash TEXT,
+    FOREIGN KEY(run_id) REFERENCES pipeline_runs(run_id)
+);
+
+CREATE TABLE IF NOT EXISTS reconciliation_checks (
+    check_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL,
+    check_name TEXT NOT NULL,
+    status TEXT NOT NULL,
+    expected_value TEXT,
+    actual_value TEXT,
+    details TEXT,
+    FOREIGN KEY(run_id) REFERENCES pipeline_runs(run_id)
 );
 
 CREATE TABLE IF NOT EXISTS customers (
@@ -102,3 +132,22 @@ def get_connection(db_path=DB_PATH):
 def initialize_database(db_path=DB_PATH):
     with get_connection(db_path) as conn:
         conn.executescript(SCHEMA)
+        # Additive migrations keep existing student databases usable.
+        migrations = {
+            "source_files": {"error_message": "TEXT"},
+            "data_quality_issues": {"source_record_number": "INTEGER", "source_file_id": "INTEGER REFERENCES source_files(source_file_id)"},
+            "data_lineage": {
+                "output_artifact_id": "TEXT",
+                "dependency_role": "TEXT NOT NULL DEFAULT 'PRIMARY_SOURCE'",
+            },
+            "transformation_logs": {
+                "input_source_file_ids": "TEXT",
+                "output_artifact_id": "TEXT",
+                "transformation_version": "TEXT NOT NULL DEFAULT '1'",
+            },
+        }
+        for table, columns in migrations.items():
+            existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+            for column, definition in columns.items():
+                if column not in existing:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")

@@ -1,26 +1,34 @@
--- Recent pipeline runs
-SELECT run_id, pipeline_name, start_time, end_time, status,
-       total_input_rows, total_output_rows, total_rejected_rows,
-       duration_seconds
-FROM pipeline_runs
-ORDER BY start_time DESC;
+-- Recent runs and row-level rejection totals
+SELECT r.run_id, r.start_time, r.end_time, r.status,
+       r.total_input_rows, r.total_output_rows, r.total_rejected_rows,
+       (SELECT COUNT(*) FROM data_quality_issues i WHERE i.run_id=r.run_id) AS issue_count,
+       r.error_message
+FROM pipeline_runs r ORDER BY r.start_time DESC;
 
--- Source-to-output lineage
-SELECT r.run_id, s.file_name, s.input_row_count,
-       l.output_location, l.output_table, l.output_row_count
-FROM pipeline_runs r
-JOIN source_files s ON s.run_id = r.run_id
-JOIN data_lineage l
-  ON l.run_id = r.run_id
- AND l.source_file_id = s.source_file_id;
+-- Query all source dependencies for each output artifact. Do not sum edge row counts.
+SELECT a.run_id, a.output_artifact_id, a.output_table, a.output_location,
+       a.output_row_count, a.output_hash, s.file_name, s.file_hash,
+       l.dependency_role
+FROM output_artifacts a
+JOIN data_lineage l ON l.output_artifact_id=a.output_artifact_id
+JOIN source_files s ON s.source_file_id=l.source_file_id
+ORDER BY a.run_id, a.output_table, l.dependency_role;
 
--- Rejected records
-SELECT run_id, source_file, source_record_id,
-       issue_type, issue_description
-FROM data_quality_issues
-ORDER BY issue_id DESC;
+-- Enrichment evidence and its inputs/output
+SELECT run_id, transformation_name, transformation_version,
+       input_source_file_ids, output_artifact_id, rows_affected,
+       execution_time_seconds
+FROM transformation_logs WHERE transformation_name='enrich_orders';
 
--- Failed runs
-SELECT run_id, start_time, end_time, error_message
-FROM pipeline_runs
-WHERE status = 'FAILED';
+-- Reconciliation failures
+SELECT run_id, check_name, expected_value, actual_value, details
+FROM reconciliation_checks WHERE status='FAIL';
+
+-- Rejected source records and issue details
+SELECT run_id, source_file_id, source_file, source_record_number, source_record_id,
+       issue_type, issue_description, raw_record
+FROM data_quality_issues ORDER BY issue_id DESC;
+
+-- File discovery/read/parse failures
+SELECT run_id, file_name, file_path, file_hash, input_row_count, file_status, error_message
+FROM source_files WHERE file_status IN ('DISCOVERED','FAILED','MISSING');

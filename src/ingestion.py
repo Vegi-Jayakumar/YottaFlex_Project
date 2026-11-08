@@ -10,8 +10,8 @@ def sha256_file(path, chunk_size=1024 * 1024):
     return digest.hexdigest()
 
 def read_csv(path):
-    """Read a CSV and return a DataFrame. Raises on malformed CSV."""
-    return pd.read_csv(path)
+    """Read fields as strings so identifiers and original values are preserved."""
+    return pd.read_csv(path, dtype="string", keep_default_na=True)
 
 def discover_csv_files(raw_dir):
     return sorted(Path(raw_dir).glob("*.csv"))
