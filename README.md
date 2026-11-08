@@ -55,6 +55,7 @@ pytest tests/ -v
 - `pipeline_runs`: one row per pipeline execution
 - `source_files`: one row per source file per run
 - `transformation_logs`: one row per logged transformation per run
+- `transformation_inputs`: same-run transformation-to-source dependency edges
 - `data_quality_issues`: one row per detected issue
 - `output_artifacts`: one row per run output, counted once
 - `data_lineage`: one row per source-file-to-output dependency edge, with role
@@ -64,6 +65,7 @@ pytest tests/ -v
 - IDs must follow the generator formats (`C######`, `P####`, `O#######`); fields are read as strings and canonicalized by trimming.
 - Business keys must be present and unique within each source file. The first canonical duplicate wins; later rows are rejected.
 - Product price must be non-negative.
+- Product price and order total must be stored as SQLite REAL; quantity must be stored as SQLite INTEGER. Bound pandas/NumPy scalars are normalized at the loading boundary.
 - Order quantity must be a positive integer.
 - Order date must parse as a date.
 - Orders must reference known customers and products.

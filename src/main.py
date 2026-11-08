@@ -16,7 +16,7 @@ from .audit_logger import (start_run, finish_run, log_source_file, update_source
 from .validation import validate_entity
 from .transformation import transform_entity, enrich_orders
 from .loading import upsert_dataframe, check_references
-from .reconciliation import export_audit_report
+from .reconciliation import export_audit_report, audit_relationship_errors
 
 def configure_logging(log_path=LOG_PATH):
     Path(log_path).parent.mkdir(parents=True, exist_ok=True)
@@ -26,7 +26,8 @@ def configure_logging(log_path=LOG_PATH):
 def _issue(run_id, db_path, file_name, issue, collector, source_file_id=None):
     log_issue(run_id, db_path, file_name, issue.get("source_record_id"),
               issue["issue_type"], issue["issue_description"], issue["raw_record"],
-              issue.get("source_record_number"), source_file_id)
+              issue.get("source_record_number"), source_file_id,
+              issue.get("diagnostic_record"))
     collector.append(issue)
 
 def _atomic_csv(df, path):
@@ -84,7 +85,8 @@ def run_pipeline(raw_dir=RAW_DIR, db_path=DB_PATH, processed_dir=PROCESSED_DIR,
                 issue["source_file_id"] = source_ids[entity]
                 log_issue(run_id, db_path, path.name, issue.get("source_record_id"),
                           issue["issue_type"], issue["issue_description"],
-                          issue["raw_record"], issue.get("source_record_number"), source_ids[entity])
+                          issue["raw_record"], issue.get("source_record_number"), source_ids[entity],
+                          issue.get("diagnostic_record"))
             transformed, elapsed = transform_entity(valid.drop(columns=["_source_record_number"], errors="ignore"), entity)
             log_transformation(run_id, db_path, f"standardize_{entity}",
                                "Trim text and normalize entity values", len(transformed), elapsed)
@@ -107,7 +109,8 @@ def run_pipeline(raw_dir=RAW_DIR, db_path=DB_PATH, processed_dir=PROCESSED_DIR,
                          "source_record_number": int(row._source_record_number),
                          "source_record_id": str(int(row._source_record_number)),
                          "issue_type": "INVALID_REFERENCE", "issue_description": ", ".join(reason),
-                         "raw_record": json.dumps({k: (None if pd.isna(v) else v) for k, v in row.drop(labels=["_source_record_number", "_source_file_id"]).to_dict().items()}, default=str)}
+                         "raw_record": row["_raw_record"],
+                         "diagnostic_record": json.dumps({k: (None if pd.isna(v) else v) for k, v in row.drop(labels=["_source_record_number", "_source_file_id", "_raw_record"]).to_dict().items()}, default=str)}
                 _issue(run_id, db_path, files["orders"].name, issue, rejects_by_file["orders"], source_ids["orders"])
                 bad_ids.add(int(row._source_record_number))
             frames["orders"] = frames["orders"].loc[~frames["orders"]["_source_record_number"].isin(bad_ids)].copy()
@@ -118,7 +121,7 @@ def run_pipeline(raw_dir=RAW_DIR, db_path=DB_PATH, processed_dir=PROCESSED_DIR,
 
         # Dimension keys are validated before any dimension commit.
         for entity in ("customers", "products"):
-            frame = frames[entity].drop(columns=["_source_record_number", "_source_file_id"], errors="ignore")
+            frame = frames[entity].drop(columns=["_source_record_number", "_source_file_id", "_raw_record"], errors="ignore")
             count = upsert_dataframe(frame, entity, run_id, files[entity].name, db_path)
             output_rows += count
             out_path = processed_dir / f"{run_id}_{entity}.csv"
@@ -127,9 +130,9 @@ def run_pipeline(raw_dir=RAW_DIR, db_path=DB_PATH, processed_dir=PROCESSED_DIR,
             log_artifact(run_id, db_path, aid, out_path, entity, count, digest)
             log_lineage(run_id, db_path, source_ids[entity], out_path, entity, count, digest, aid, "PRIMARY_SOURCE")
 
-        orders = frames["orders"].drop(columns=["_source_record_number", "_source_file_id"], errors="ignore")
+        orders = frames["orders"].drop(columns=["_source_record_number", "_source_file_id", "_raw_record"], errors="ignore")
         started = time.perf_counter()
-        enriched = enrich_orders(orders, frames["products"].drop(columns=["_source_record_number", "_source_file_id"], errors="ignore"))
+        enriched = enrich_orders(orders, frames["products"].drop(columns=["_source_record_number", "_source_file_id", "_raw_record"], errors="ignore"))
         enriched = enriched.drop(columns=["unit_price"])
         enrich_elapsed = time.perf_counter() - started
         count = upsert_dataframe(enriched, "orders", run_id, files["orders"].name, db_path)
@@ -139,7 +142,9 @@ def run_pipeline(raw_dir=RAW_DIR, db_path=DB_PATH, processed_dir=PROCESSED_DIR,
         log_artifact(run_id, db_path, aid, out_path, "orders", count, digest)
         log_transformation(run_id, db_path, "enrich_orders", "Join product unit price and calculate total_amount",
                            len(enriched), enrich_elapsed,
-                           [source_ids["orders"], source_ids["products"], source_ids["customers"]], aid, "1.0")
+                           [{"source_file_id": source_ids["orders"], "dependency_role": "PRIMARY_SOURCE"},
+                            {"source_file_id": source_ids["products"], "dependency_role": "PRICE_LOOKUP"},
+                            {"source_file_id": source_ids["customers"], "dependency_role": "REFERENCE_VALIDATION"}], aid, "1.0")
         log_lineage(run_id, db_path, source_ids["orders"], out_path, "orders", count, digest, aid, "PRIMARY_SOURCE")
         log_lineage(run_id, db_path, source_ids["products"], out_path, "orders", count, digest, aid, "PRICE_LOOKUP")
         log_lineage(run_id, db_path, source_ids["customers"], out_path, "orders", count, digest, aid, "REFERENCE_VALIDATION")
@@ -168,7 +173,18 @@ def run_pipeline(raw_dir=RAW_DIR, db_path=DB_PATH, processed_dir=PROCESSED_DIR,
         checks.append(("orders_total_amount_sum", "PASS" if round(float(target_orders_total), 2) == source_orders_total else "FAIL", str(source_orders_total), str(target_orders_total), "processed output compared with current-run target"))
         with get_connection(db_path) as conn:
             fk_violations = len(conn.execute("PRAGMA foreign_key_check").fetchall())
+            storage_violations = conn.execute("""SELECT COUNT(*) FROM orders o
+                JOIN products p ON p.product_id=o.product_id
+                WHERE o.run_id=? AND (typeof(o.quantity)<>'integer' OR
+                      typeof(p.unit_price)<>'real' OR typeof(o.total_amount)<>'real')""", (run_id,)).fetchone()[0]
+            arithmetic_violations = conn.execute("""SELECT COUNT(*) FROM orders o
+                JOIN products p ON p.product_id=o.product_id
+                WHERE o.run_id=? AND ROUND(o.quantity * p.unit_price, 2) <> ROUND(o.total_amount, 2)""", (run_id,)).fetchone()[0]
         checks.append(("foreign_key_integrity", "PASS" if fk_violations == 0 else "FAIL", "0", str(fk_violations), "SQLite foreign_key_check"))
+        checks.append(("numeric_sqlite_storage_types", "PASS" if storage_violations == 0 else "FAIL", "0", str(storage_violations), "orders.quantity INTEGER; products.unit_price and orders.total_amount REAL"))
+        checks.append(("per_order_amount_reconciliation", "PASS" if arithmetic_violations == 0 else "FAIL", "0", str(arithmetic_violations), "SQL recomputation using target quantity and price"))
+        relationship_errors = audit_relationship_errors(db_path, run_id)
+        checks.append(("same_run_audit_relationships", "PASS" if not relationship_errors else "FAIL", "0", str(len(relationship_errors)), "; ".join(relationship_errors)))
         with get_connection(db_path) as conn:
             for name, check_status, expected, actual, details in checks:
                 conn.execute("INSERT INTO reconciliation_checks(run_id,check_name,status,expected_value,actual_value,details) VALUES(?,?,?,?,?,?)",

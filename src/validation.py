@@ -27,6 +27,7 @@ def validate_entity(df, entity, source_file):
     # Raw values are captured before trimming, numeric conversion, or date parsing.
     raw = {idx: json.dumps(row.to_dict(), ensure_ascii=False, default=str)
            for idx, row in data.drop(columns=["_source_record_number"]).iterrows()}
+    data["_raw_record"] = pd.Series(raw)
     rejects = []
     issue_indexes = set()
     id_col = {"customers": "customer_id", "products": "product_id", "orders": "order_id"}[entity]
@@ -70,5 +71,12 @@ def validate_entity(df, entity, source_file):
         data["quantity"] = data["quantity"].where(~bad_qty).astype("Int64")
 
     valid = data.loc[~data.index.isin(issue_indexes)].copy()
+    for issue in rejects:
+        index = issue_indexes and next(idx for idx in data.index
+                                       if int(data.at[idx, "_source_record_number"]) == issue["source_record_number"])
+        diagnostics = data.loc[index].drop(labels=["_source_record_number", "_raw_record"]).to_dict()
+        issue["diagnostic_record"] = json.dumps(
+            {key: (None if pd.isna(value) else value) for key, value in diagnostics.items()},
+            ensure_ascii=False, default=str)
     # Internal provenance remains through reference validation and is removed before publication.
     return valid.reset_index(drop=True), rejects

@@ -20,6 +20,24 @@ SELECT run_id, transformation_name, transformation_version,
        execution_time_seconds
 FROM transformation_logs WHERE transformation_name='enrich_orders';
 
+SELECT t.run_id, t.transformation_name, x.dependency_role,
+       s.file_name, s.file_hash, a.output_table, a.output_hash
+FROM transformation_logs t
+JOIN transformation_inputs x ON x.transformation_id=t.transformation_id AND x.run_id=t.run_id
+JOIN source_files s ON s.source_file_id=x.source_file_id AND s.run_id=x.run_id
+LEFT JOIN output_artifacts a ON a.output_artifact_id=t.output_artifact_id AND a.run_id=t.run_id;
+
+-- Numeric target storage and per-order calculation
+SELECT typeof(o.quantity) AS quantity_storage, typeof(p.unit_price) AS price_storage,
+       typeof(o.total_amount) AS amount_storage, COUNT(*) AS row_count
+FROM orders o JOIN products p USING(product_id)
+GROUP BY typeof(o.quantity), typeof(p.unit_price), typeof(o.total_amount);
+
+SELECT o.order_id, o.quantity, p.unit_price, o.total_amount,
+       ROUND(o.quantity * p.unit_price, 2) AS recalculated_amount
+FROM orders o JOIN products p USING(product_id)
+WHERE ROUND(o.quantity * p.unit_price, 2) <> ROUND(o.total_amount, 2);
+
 -- Reconciliation failures
 SELECT run_id, check_name, expected_value, actual_value, details
 FROM reconciliation_checks WHERE status='FAIL';

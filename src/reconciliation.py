@@ -1,5 +1,34 @@
 from .database import get_connection
 
+def audit_relationship_errors(db_path, run_id=None):
+    """Validate same-run audit links, including legacy nullable/text-encoded links."""
+    errors = []
+    scope = " AND d.run_id=?" if run_id else ""
+    params = (run_id,) if run_id else ()
+    with get_connection(db_path) as conn:
+        queries = [
+            ("lineage_source", f"SELECT COUNT(*) FROM data_lineage d LEFT JOIN source_files s ON s.source_file_id=d.source_file_id AND s.run_id=d.run_id WHERE s.source_file_id IS NULL{scope}", params),
+            ("lineage_artifact", f"SELECT COUNT(*) FROM data_lineage d LEFT JOIN output_artifacts a ON a.output_artifact_id=d.output_artifact_id AND a.run_id=d.run_id WHERE d.output_artifact_id IS NOT NULL AND a.output_artifact_id IS NULL{scope}", params),
+            ("transformation_artifact", f"SELECT COUNT(*) FROM transformation_logs t LEFT JOIN output_artifacts a ON a.output_artifact_id=t.output_artifact_id AND a.run_id=t.run_id WHERE t.output_artifact_id IS NOT NULL AND a.output_artifact_id IS NULL{(' AND t.run_id=?' if run_id else '')}", params),
+            ("issue_source", f"SELECT COUNT(*) FROM data_quality_issues i LEFT JOIN source_files s ON s.source_file_id=i.source_file_id AND s.run_id=i.run_id WHERE i.source_file_id IS NOT NULL AND s.source_file_id IS NULL{(' AND i.run_id=?' if run_id else '')}", params),
+            ("transformation_input_bridge", f"SELECT COUNT(*) FROM transformation_inputs x LEFT JOIN source_files s ON s.source_file_id=x.source_file_id AND s.run_id=x.run_id LEFT JOIN transformation_logs t ON t.transformation_id=x.transformation_id AND t.run_id=x.run_id WHERE (s.source_file_id IS NULL OR t.transformation_id IS NULL){(' AND x.run_id=?' if run_id else '')}", params),
+        ]
+        for name, sql, query_params in queries:
+            count = conn.execute(sql, query_params).fetchone()[0]
+            if count: errors.append(f"{name}={count}")
+        trans_query = "SELECT run_id, transformation_id, input_source_file_ids FROM transformation_logs" + (" WHERE run_id=?" if run_id else "")
+        for row in conn.execute(trans_query, params):
+            try:
+                inputs = __import__("json").loads(row["input_source_file_ids"] or "[]")
+            except (TypeError, ValueError):
+                errors.append(f"transformation_input_json_invalid={row['transformation_id']}")
+                continue
+            for item in inputs:
+                source_id = item.get("source_file_id") if isinstance(item, dict) else item
+                found = conn.execute("SELECT 1 FROM source_files WHERE source_file_id=? AND run_id=?", (source_id, row["run_id"])).fetchone()
+                if not found: errors.append(f"transformation_input_cross_run={row['transformation_id']}:{source_id}")
+    return errors
+
 def get_run_summary(run_id, db_path):
     with get_connection(db_path) as conn:
         run = conn.execute(

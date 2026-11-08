@@ -59,19 +59,25 @@ def log_transformation(run_id, db_path, name, description,
              __import__("json").dumps(input_source_file_ids or []),
              output_artifact_id, version),
         )
+        input_items = input_source_file_ids or []
+        for item in input_items:
+            source_id = item["source_file_id"] if isinstance(item, dict) else item
+            role = item.get("dependency_role", "INPUT") if isinstance(item, dict) else "INPUT"
+            conn.execute("INSERT INTO transformation_inputs(transformation_id,run_id,source_file_id,dependency_role) VALUES (?,?,?,?)",
+                         (cur.lastrowid, run_id, source_id, role))
         return cur.lastrowid
 
 def log_issue(run_id, db_path, source_file, record_id,
               issue_type, description, raw_record, source_record_number=None,
-              source_file_id=None):
+              source_file_id=None, diagnostic_record=None):
     with get_connection(db_path) as conn:
         conn.execute(
             """INSERT INTO data_quality_issues
                (run_id, source_file, source_record_id, source_record_number, source_file_id, issue_type,
-                issue_description, raw_record)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+               issue_description, raw_record, diagnostic_record)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (run_id, source_file, str(record_id) if record_id is not None else None,
-             source_record_number, source_file_id, issue_type, description, raw_record),
+             source_record_number, source_file_id, issue_type, description, raw_record, diagnostic_record),
         )
 
 def log_lineage(run_id, db_path, source_file_id, output_location,

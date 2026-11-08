@@ -27,7 +27,8 @@ CREATE TABLE IF NOT EXISTS source_files (
     input_row_count INTEGER,
     file_status TEXT,
     error_message TEXT,
-    FOREIGN KEY(run_id) REFERENCES pipeline_runs(run_id)
+    FOREIGN KEY(run_id) REFERENCES pipeline_runs(run_id),
+    UNIQUE(run_id, source_file_id)
 );
 
 CREATE TABLE IF NOT EXISTS transformation_logs (
@@ -40,7 +41,9 @@ CREATE TABLE IF NOT EXISTS transformation_logs (
     input_source_file_ids TEXT,
     output_artifact_id TEXT,
     transformation_version TEXT NOT NULL DEFAULT '1',
-    FOREIGN KEY(run_id) REFERENCES pipeline_runs(run_id)
+    FOREIGN KEY(run_id) REFERENCES pipeline_runs(run_id),
+    UNIQUE(run_id, transformation_id),
+    FOREIGN KEY(run_id, output_artifact_id) REFERENCES output_artifacts(run_id, output_artifact_id)
 );
 
 CREATE TABLE IF NOT EXISTS data_quality_issues (
@@ -50,11 +53,12 @@ CREATE TABLE IF NOT EXISTS data_quality_issues (
     source_record_id TEXT,
     source_record_number INTEGER,
     source_file_id INTEGER,
+    diagnostic_record TEXT,
     issue_type TEXT NOT NULL,
     issue_description TEXT NOT NULL,
     raw_record TEXT,
     FOREIGN KEY(run_id) REFERENCES pipeline_runs(run_id),
-    FOREIGN KEY(source_file_id) REFERENCES source_files(source_file_id)
+    FOREIGN KEY(run_id, source_file_id) REFERENCES source_files(run_id, source_file_id)
 );
 
 CREATE TABLE IF NOT EXISTS data_lineage (
@@ -68,7 +72,8 @@ CREATE TABLE IF NOT EXISTS data_lineage (
     output_artifact_id TEXT,
     dependency_role TEXT NOT NULL DEFAULT 'PRIMARY_SOURCE',
     FOREIGN KEY(run_id) REFERENCES pipeline_runs(run_id),
-    FOREIGN KEY(source_file_id) REFERENCES source_files(source_file_id)
+    FOREIGN KEY(run_id, source_file_id) REFERENCES source_files(run_id, source_file_id),
+    FOREIGN KEY(run_id, output_artifact_id) REFERENCES output_artifacts(run_id, output_artifact_id)
 );
 
 CREATE TABLE IF NOT EXISTS output_artifacts (
@@ -78,7 +83,18 @@ CREATE TABLE IF NOT EXISTS output_artifacts (
     output_table TEXT NOT NULL,
     output_row_count INTEGER NOT NULL,
     output_hash TEXT,
-    FOREIGN KEY(run_id) REFERENCES pipeline_runs(run_id)
+    FOREIGN KEY(run_id) REFERENCES pipeline_runs(run_id),
+    UNIQUE(run_id, output_artifact_id)
+);
+
+CREATE TABLE IF NOT EXISTS transformation_inputs (
+    transformation_id INTEGER NOT NULL,
+    run_id TEXT NOT NULL,
+    source_file_id INTEGER NOT NULL,
+    dependency_role TEXT NOT NULL,
+    PRIMARY KEY(transformation_id, source_file_id, dependency_role),
+    FOREIGN KEY(run_id, transformation_id) REFERENCES transformation_logs(run_id, transformation_id),
+    FOREIGN KEY(run_id, source_file_id) REFERENCES source_files(run_id, source_file_id)
 );
 
 CREATE TABLE IF NOT EXISTS reconciliation_checks (
@@ -105,7 +121,8 @@ CREATE TABLE IF NOT EXISTS products (
     product_name TEXT NOT NULL,
     unit_price REAL NOT NULL CHECK(unit_price >= 0),
     source_file TEXT,
-    run_id TEXT
+    run_id TEXT,
+    CHECK(typeof(unit_price) = 'real')
 );
 
 CREATE TABLE IF NOT EXISTS orders (
@@ -117,9 +134,18 @@ CREATE TABLE IF NOT EXISTS orders (
     total_amount REAL NOT NULL,
     source_file TEXT,
     run_id TEXT,
+    CHECK(typeof(quantity) = 'integer'),
+    CHECK(typeof(total_amount) = 'real'),
     FOREIGN KEY(customer_id) REFERENCES customers(customer_id),
     FOREIGN KEY(product_id) REFERENCES products(product_id)
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_source_files_run_id
+    ON source_files(run_id, source_file_id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_output_artifacts_run_id
+    ON output_artifacts(run_id, output_artifact_id);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_transformations_run_id
+    ON transformation_logs(run_id, transformation_id);
 """
 
 def get_connection(db_path=DB_PATH):
@@ -135,7 +161,7 @@ def initialize_database(db_path=DB_PATH):
         # Additive migrations keep existing student databases usable.
         migrations = {
             "source_files": {"error_message": "TEXT"},
-            "data_quality_issues": {"source_record_number": "INTEGER", "source_file_id": "INTEGER REFERENCES source_files(source_file_id)"},
+            "data_quality_issues": {"source_record_number": "INTEGER", "source_file_id": "INTEGER REFERENCES source_files(source_file_id)", "diagnostic_record": "TEXT"},
             "data_lineage": {
                 "output_artifact_id": "TEXT",
                 "dependency_role": "TEXT NOT NULL DEFAULT 'PRIMARY_SOURCE'",
