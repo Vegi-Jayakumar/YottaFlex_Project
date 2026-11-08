@@ -1,84 +1,42 @@
-# DataFlow – ETL Pipeline Audit & Lineage
+# DataFlow ETL Audit and Lineage
 
-A local, reproducible Python ETL project demonstrating ingestion, schema and business-rule validation, quarantine, transformations, SQLite publishing, run auditing, and source-to-output lineage.
+A small Python, pandas, and SQLite pipeline that validates customer, product, and order CSVs; records rejects and run metrics; publishes business tables; and traces outputs to their source files.
 
-## Requirements
-- Python 3.10+
-- Install dependencies: `pip install -r requirements.txt`
+## Setup
 
-## Generate sample data
-From the project root:
+Use Python 3.10 or newer from the project root:
 
-```bash
+```powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+```
+
+Generate deterministic sample inputs and run the pipeline:
+
+```powershell
 python -m scripts.generate_data --rows 1000 --seed 42
-```
-
-For a larger run:
-
-```bash
-python -m scripts.generate_data --rows 100000 --seed 42
-```
-
-## Run pipeline
-
-```bash
 python -m src.main
 ```
 
-Or specify paths:
+Run checks with `python -m pytest -q`. To use custom paths:
 
-```bash
-python -m src.main --raw-dir data/raw --db-path dataflow_audit.db
+```powershell
+python -m src.main --raw-dir data/raw --db-path dataflow_audit.db `
+  --processed-dir data/processed --quarantine-dir data/quarantine `
+  --report-path reports/run_audit.csv --log-path logs/pipeline.log
 ```
 
-All output locations can be set independently with `--processed-dir`,
-`--quarantine-dir`, `--report-path`, and `--log-path`. Without `--report-path`,
-the run writes a separate audit extract beside the selected database.
+The three required inputs are `customers.csv`, `products.csv`, and `orders.csv`. Main outputs are a SQLite database, run-specific processed CSVs, issue-grain quarantine CSVs, a run report, and an operational log. Output directories are created when needed.
 
-## Run tests
+## Naming and identifiers
 
-```bash
-pytest tests/ -v
-```
+- Tables, columns, Python names, and filenames use lowercase `snake_case`.
+- Business keys are stable strings: `customer_id` (`C######`), `product_id` (`P####`), and `order_id` (`O#######`). The generator derives them from row ordinals, so a fixed seed and row count reproduce the same keys. CSV IDs are read as strings to preserve leading zeros.
+- `run_id` and `output_artifact_id` are UUIDs unique to an execution/artifact, allowing identical reruns to remain separate audit attempts. `source_file_id` is a database-generated surrogate key scoped to a source-file record; `source_file` stores the input filename on business and issue records. `source_record_number` identifies the row within that source.
+- Run timestamps are UTC ISO-8601 strings with an explicit `+00:00` offset. Business `order_date` is a calendar date in `YYYY-MM-DD` form.
+- Audit entities carry `run_id`; source-dependent records also carry `source_file_id` or `source_file` as defined in the [data dictionary](docs/data_dictionary.md).
 
-## Main outputs
-- `dataflow_audit.db`: target business tables and audit metadata
-- `data/processed/`: run-specific processed CSV outputs
-- `data/quarantine/`: rejected record details
-- `logs/pipeline.log`: operational log
-- `reports/<run_id>_audit_report.csv`: run-specific source-to-output audit extract
+## Data and design notes
 
-## Data model and grain
-- `customers`: one row per `customer_id`
-- `products`: one row per `product_id`
-- `orders`: one row per `order_id`
-- `pipeline_runs`: one row per pipeline execution
-- `source_files`: one row per source file per run
-- `transformation_logs`: one row per logged transformation per run
-- `transformation_inputs`: same-run transformation-to-source dependency edges
-- `data_quality_issues`: one row per detected issue
-- `output_artifacts`: one row per run output, counted once
-- `data_lineage`: one row per source-file-to-output dependency edge, with role
-- `reconciliation_checks`: persisted PASS/FAIL invariant results
-
-## Business rules
-- IDs must follow the generator formats (`C######`, `P####`, `O#######`); fields are read as strings and canonicalized by trimming.
-- Business keys must be present and unique within each source file. The first canonical duplicate wins; later rows are rejected.
-- Product price must be non-negative.
-- Product price and order total must be stored as SQLite REAL; quantity must be stored as SQLite INTEGER. Bound pandas/NumPy scalars are normalized at the loading boundary.
-- Order quantity must be a positive integer.
-- Order date must parse as a date.
-- Orders must reference known customers and products.
-- Invalid records are logged with their source record number and raw payload.
-- Extra input columns are rejected under schema version 1. Product price may be zero and must be finite.
-
-## Idempotency and limitations
-Business tables use stable primary keys and SQLite upserts, so rerunning the same input does not create duplicate business keys. Each execution still creates a separate run record and output snapshot. This starter implementation updates an existing business row when the same key is reprocessed; production systems should add source versioning or event-time conflict rules to prevent older data overwriting newer data.
-
-The project is a local single-process demonstration. A retry replays the complete three-file snapshot; business keys upsert, so it is safe from duplicate keys but older snapshots can overwrite newer values. The three business table loads use separate transactions, so a later failure can leave earlier tables committed. Cross-table atomic publication and event-time conflict protection are not implemented. Per-run audit report writes use a temporary file and atomic replacement; a report failure marks the run failed.
-
-## Naming conventions
-- `snake_case` for tables, columns, functions, and files
-- `run_id` identifies one execution
-- ISO-8601 UTC timestamps for run start/end
-- `source_file` records input provenance
+See the [data dictionary](docs/data_dictionary.md) for fields and constraints, and [architecture](docs/architecture.md) for the pipeline flow and lineage. Business tables upsert by business key. A retry replays the full three-file snapshot; it can overwrite newer values for the same key. Customer, product, and order loads use separate transactions, so cross-table atomic publication is not provided.
